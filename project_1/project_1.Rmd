@@ -1,0 +1,244 @@
+---
+title: "贝叶斯分析期末课程论文"
+author: "张涵 PB20010469"
+date: "2023-02-18"
+documentclass: ctexart
+output:
+  pdf_document: 
+    latex_engine: xelatex
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+library(tidyverse)
+library(tidybayes)
+library(rstan)
+library(wesanderson)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+# 研究的问题
+
+  2020年夏季奥林匹克运动会，是第32届夏季奥林匹克运动会，于2021年7月23日至8月8日在日本东京都举行，为期17天。我在网上看到一篇文章，利用其中男子短跑100米这一项目之前几届的数据进行分析，进而来尝试预测这一届的比赛情况，这很契合贝叶斯统计的思想，也给了我一个练习学到的各种贝叶斯方法的机会。我在这里使用的统计工具是Rstudio 和rstan。
+
+# 往届男子100米短跑数据
+
+  以下是搜集到的男子100米短跑历年冠军成绩，用数据框的形式直接输入。
+
+```{r echo=FALSE}
+golddata <- tibble::tribble(
+  ~Year,     ~Event,           ~Athlete, ~Medal, ~Country, ~Time,
+  1896L, "100m Men",        "Tom Burke", "GOLD",    "USA",    12,
+  1900L, "100m Men",     "Frank Jarvis", "GOLD",    "USA",    11,
+  1904L, "100m Men",      "Archie Hahn", "GOLD",    "USA",    11,
+  1906L, "100m Men",      "Archie Hahn", "GOLD",    "USA",  11.2,
+  1908L, "100m Men",    "Reggie Walker", "GOLD",    "SAF",  10.8,
+  1912L, "100m Men",      "Ralph Craig", "GOLD",    "USA",  10.8,
+  1920L, "100m Men",  "Charles Paddock", "GOLD",    "USA",  10.8,
+  1924L, "100m Men",  "Harold Abrahams", "GOLD",    "GBR",  10.6,
+  1928L, "100m Men",   "Percy Williams", "GOLD",    "CAN",  10.8,
+  1932L, "100m Men",      "Eddie Tolan", "GOLD",    "USA",  10.3,
+  1936L, "100m Men",      "Jesse Owens", "GOLD",    "USA",  10.3,
+  1948L, "100m Men", "Harrison Dillard", "GOLD",    "USA",  10.3,
+  1952L, "100m Men",   "Lindy Remigino", "GOLD",    "USA",  10.4,
+  1956L, "100m Men",     "Bobby Morrow", "GOLD",    "USA",  10.5,
+  1960L, "100m Men",       "Armin Hary", "GOLD",    "GER",  10.2,
+  1964L, "100m Men",        "Bob Hayes", "GOLD",    "USA",    10,
+  1968L, "100m Men",        "Jim Hines", "GOLD",    "USA",  9.95,
+  1972L, "100m Men",    "Valery Borzov", "GOLD",    "URS", 10.14,
+  1976L, "100m Men",  "Hasely Crawford", "GOLD",    "TRI", 10.06,
+  1980L, "100m Men",      "Allan Wells", "GOLD",    "GBR", 10.25,
+  1984L, "100m Men",       "Carl Lewis", "GOLD",    "USA",  9.99,
+  1988L, "100m Men",       "Carl Lewis", "GOLD",    "USA",  9.92,
+  1992L, "100m Men", "Linford Christie", "GOLD",    "GBR",  9.96,
+  1996L, "100m Men",   "Donovan Bailey", "GOLD",    "CAN",  9.84,
+  2000L, "100m Men",   "Maurice Greene", "GOLD",    "USA",  9.87,
+  2004L, "100m Men",    "Justin Gatlin", "GOLD",    "USA",  9.85,
+  2008L, "100m Men",       "Usain Bolt", "GOLD",    "JAM",  9.69,
+  2012L, "100m Men",       "Usain Bolt", "GOLD",    "JAM",  9.63,
+  2016L, "100m Men",       "Usain Bolt", "GOLD",    "JAM",  9.81
+  )
+
+
+golddata
+```
+
+用可视化折线图的形式呈现如下：
+
+```{r echo=FALSE,cache=TRUE}
+golddata %>%
+  ggplot( aes(x = Year, y = Time)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Winning times of Olympic gold medalist 100m sprint men")
+```
+
+
+# 具体分步骤处理
+
+
+## 模型取定
+
+  经过一系列数学分析，我认为男子100米短跑时间符合S型曲线形状，并且曲线的数学表达式可以大致给出 $$
+f(x)=L+1-\frac{x}{(1+|x|^k)^{\frac{1}{k}}}
+$$ 当$L=9$和 $k=0.9$，其中$f(x)$表示运动员成绩（time）,$x$是年份（year）的某种变换，图形便是如下这个样子：
+
+```{r echo=FALSE,cache=TRUE}
+myfun <- function(x) {
+  L <- 9
+  k <- 0.9
+  L + 1 - x/((1 + abs(x)^k)^(1/k))
+}
+
+ggplot(data = data.frame(x = c(-3, 10)), aes(x = x)) +
+  stat_function(fun = myfun, geom = "line", colour = "red")
+```
+
+
+## 贝叶斯回归模型
+
+  从上面的数学模型出发，我们再引入一系列参数$C,S,L,k,\sigma$等，便得到了一个可研究的，具体的非线性贝叶斯回归模型如下：
+
+$$
+\begin{aligned}
+\text { Time } & \sim \operatorname{Normal}(\mu, \sigma) \\
+\mu=f(\text { Year, } C, S, L, k) & =L+1-\frac{(\text { Year }-C) / S}{\left(1+\mid(\text { Year }-C) /\left.S\right|^k\right)^{1 / k}} \\
+C & \sim \operatorname{Normal}(1959,5) \\
+S & \sim \operatorname{Normal}(37,1) \\
+L & \sim \operatorname{Normal}(9,0.2) \\
+k & \sim \operatorname{Normal}(1,0.2) \\
+\sigma & \sim \operatorname{StudentT}(3,0,2.5)
+\end{aligned}
+$$
+
+
+## 数据预处理
+
+  经考虑剔除掉1896年的记录，因为从折线图上来看这组数据过于偏离其他数据，而其他数据则一并保留。
+
+```{r echo=FALSE}
+golddata1900 <- golddata %>%
+  filter(Year >= 1900)
+
+#C <- mean(golddata1900$Year)
+#S <- sd(golddata1900$Year)
+
+golddata1900
+```
+
+## Rstudio 与 rstan
+
+这里采用了Stan 来做MCMC抽样，以及进一步的模拟。是通过在Rstudio中调用rstan来实现，具体代码格式可以参看rstan官网，这里也并不复杂，我想谈的是一点安装rstan包的经验，我按照Github上的指南，各部分都装的最新版本，但安装后运行一直报错，主要问题出在 R的版本，Rtools 以及rstan包的版本不适配，最后我选择的是R version 4.0.2,Rtools version 4.0,以及rstan包从"source"下载最新的，可以正常运行。
+
+```{r tidy=TRUE,cache=TRUE}
+stan_program <- "
+data {
+  int N;
+  vector[N] year;
+  vector[N] time;
+}
+parameters {
+  real C;
+  real S;
+  real L;
+  real k;
+  real<lower=0> sigma;
+}
+model {
+  vector[N] mu;
+
+  for(i in 1:N) {
+    mu[i] =  L + 1 - ((year[i]-C)/S) / (1+fabs((year[i]-C)/S)^k)^(1/k);
+  }
+
+  C ~ normal(1959, 5);
+  S ~ normal(37, 1);
+  L ~ normal(9, 0.2);
+  k ~ normal(1, 0.2);
+  sigma ~ student_t(3, 0, 2.5);
+
+  time ~ normal(mu, sigma);
+
+}
+generated quantities {
+  vector[N] y_rep;
+
+  for (n in 1:N) {
+    y_rep[n] = normal_rng(L + 1 - ((year[n]-C)/S) / (1+fabs((year[n]-C)/S)^k)^(1/k), sigma);
+  }
+
+}
+"
+
+
+stan_data <- golddata1900 %>%
+  tidybayes::compose_data(
+    N        = nrow(.),
+    year     = Year,
+    time     = Time
+  )
+
+
+
+fit <- stan(model_code = stan_program, data = stan_data, 
+             seed = 1024, 
+             iter = 4000, 
+             warmup = 2000)
+
+```
+
+抽样完毕后把结果通过如下可视化的方式呈现：
+
+```{r tidy=TRUE,cache=TRUE}
+bayesplot::mcmc_trace(fit, pars = c("C", "S", "L", "k", "sigma"), facet_args = list(nrow = 5))
+```
+
+还可伴着之前的抽样曲线在图上做出抽样点，和大致的抽样区域：
+
+```{r tidy=TRUE,cache=TRUE}
+fit %>%
+  tidybayes::gather_draws(y_rep[i]) %>%
+  mean_qi() %>%
+  bind_cols(golddata1900) %>%
+  ggplot(aes(x = Year, y = Time)) +
+  geom_point(size = 5) +
+  geom_line(aes(y = .value), size = 2, color = "orange") +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper),
+    alpha = 0.3,
+    fill = "gray50"
+  ) +
+  theme_classic()
+```
+
+## 进一步作出预测
+
+在训练出了想要的模型之后，便可带入时间，来对接下来几年的运动员成绩做预测了。
+
+```{r }
+y_pred <- function(year, C, S, L, k, sigma) {
+  mu <- L + 1 - ((year - C) / S) / (1 + abs((year - C) / S)^k)^(1 / k)
+  rnorm(n = 1, mean = mu, sd = sigma)
+}
+
+sim <- fit %>%
+  tidybayes::spread_draws(C, S, L, k, sigma) %>%
+  ungroup() %>%
+  rowwise() %>%
+  mutate(
+    pred2021 = y_pred(year = 2021, C, S, L, k, sigma),
+    pred2024 = y_pred(year = 2024, C, S, L, k, sigma),
+    pred2028 = y_pred(year = 2028, C, S, L, k, sigma)
+  ) %>%
+  ungroup()
+
+sim %>% 
+  select(starts_with("pred")) %>%
+  map_dfr(
+   ~tidybayes::mean_hdi(.x)
+  )
+```
